@@ -1,15 +1,21 @@
-import { AttributeValue, BatchWriteItemCommand, DynamoDBClient, PutItemCommand, PutRequest, ScanCommand, ScanCommandInput, ScanInput, WriteRequest } from "@aws-sdk/client-dynamodb";
+import { AttributeValue, BatchWriteItemCommand, BatchWriteItemCommandInput, BatchWriteItemCommandOutput, DynamoDBClient, PutItemCommand, PutRequest, ScanCommand, ScanCommandInput, ScanInput, WriteRequest } from "@aws-sdk/client-dynamodb";
 import { marshall,unmarshall } from '@aws-sdk/util-dynamodb';
-import { chunk, isEmpty, update } from "lodash";
+import { chunk, isEmpty, random, update } from "lodash";
 import * as crypto from "crypto";
 import { start } from "repl";
 import { PassThrough } from "stream";
 
-const timer = ms => new Promise( res => setTimeout(res, ms));
-
 const ddb = new DynamoDBClient({ region: 'eu-north-1' });
 
-function randomHex(length: number) {
+interface Item {
+    [key:string]: {} | undefined
+}
+
+function timer(ms:number) {
+    return new Promise( res => setTimeout(res, ms))
+}
+
+function randomHex(length: number): string {
     return crypto.randomBytes(length).toString('hex');
 }
 
@@ -37,17 +43,10 @@ function makeItemsFromList(items:Item[]) {
             }
         })
     };
-
-    console.log(ddbItems);
-
     return ddbItems;
 }
 
-function changeAttributesonAll(items:[object], oldAttr:string, newAttr:string, del:boolean) {
-    interface Item {
-        [key:string]: Object | undefined
-    }
-
+function changeAttributesonAll(items:Item[], oldAttr:string, newAttr:string, del:boolean) {
     const newItems = [];
     for (let item of items) {
         let newItem:Item = {};
@@ -61,37 +60,57 @@ function changeAttributesonAll(items:[object], oldAttr:string, newAttr:string, d
     return newItems;
 }
 
-async function scan(table: string, oldAttr:string, newAttr:string, del:boolean, startKey:object = {}) {
+async function scan(table: string, oldAttr: string, newAttr: string, del: boolean, startKey?:{}) {
 
-    let params:object = {
+    let params:ScanCommandInput = {
         TableName: table,
         Limit: 1000,
         ExpressionAttributeNames: {"#v": oldAttr},
-        FilterExpression: 'attribute_exists(#v)'
+        FilterExpression: 'attribute_exists(#v)',
+        ExclusiveStartKey: startKey
     }
     if (!isEmpty(startKey)) {
         params = {...params, ExclusiveStartKey: startKey};
     }
 
-    let scanInput:ScanCommandInput = {...params};
-    let response = await ddb.send(new ScanCommand(scanInput));
+    let response = await ddb.send(new ScanCommand(params));
 
     if (!isEmpty(response.Items)) {
-        const updatedItems = changeAttributesonAll(response.Items, oldAttr, newAttr, true);
+        const updatedItems = changeAttributesonAll(response.Items as Item[], oldAttr, newAttr, true);
         const ddbItems = makeItemsFromList(updatedItems);
         await batchWrite(table, ddbItems);
     }
 
     // console.log(JSON.stringify(response, null, 2), "\n-------------------------");
-    if (!isEmpty(response.LastEvaluatedKey)) {
-        await scan(table, oldAttr, newAttr, true, response.LastEvaluatedKey)
+    // if (!isEmpty(response.LastEvaluatedKey)) {
+    //     await scan(table, oldAttr, newAttr, true, response.LastEvaluatedKey)
+    // }
+}
+
+// async function sendSingleBatchWithBackoff(table: string, params: BatchWriteItemCommandInput, retries: number = 0): Promise<BatchWriteItemCommandOutput> {
+async function sendSingleBatchWithBackoff(table: string, params: BatchWriteItemCommandInput, retries: number = 0) {
+    try {
+        return ddb.send(new BatchWriteItemCommand(params));
+    } catch (e) {
+        console.log(typeof e);
+        throw new Error('poop');
+    //     if (e instanceof Error) {
+    //         if (e.errorType === 'ThrottlingException' && retries < 6) {
+    //             const delay:number = random(500 * 2 ** retries);
+    //             console.log(`Throttled sending batch, attempt ${retries}, sleeping ${delay}`)
+    //             await timer(delay); // linear backoff + jitter
+    //             return sendSingleBatchWithBackoff(table, params, retries);
+    //         } else {
+    //             throw new Error(e.errorMessage);
+    //         }
+
+    //     }
     }
 }
 
-async function batchWrite(table:string, items:object[]) {
+async function batchWrite(table:string, items:{}[]) {
 
     let batches = chunk(items, 25);
-
     const promises = [];
 
     // set a limit to nbr of batches
@@ -108,40 +127,55 @@ async function batchWrite(table:string, items:object[]) {
         console.log(`sending batch ${counter}`)
 
         promises.push(ddb.send(new BatchWriteItemCommand(params)));
+        // promises.push(sendSingleBatchWithBackoff(table, params))
         if (counter % concurrentBatches == 0) {
-            await timer(1000 - (Date.now() - timestamp));
+            await timer(500 - (Date.now() - timestamp));
             timestamp = Date.now();
         };
     };
 
-    const response = await Promise.all(promises);
+    const response = await Promise.allSettled(promises);
+    for (let r of response) {
+        if (r.status === 'rejected') console.log(r);
+    }
+    // for (let r of result) {
+    //     if (!isEmpty(r.UnprocessedItems)) {
+    //         let unpItems:PutRequest[] = [];
+    //         for (let unp of r.UnprocessedItems[table]) {
+    //             console.log(unp.PutRequest)
+    //             unpItems.push(unp.PutRequest);
+    //         };
+
+    //     };
+    // }
+
+    // if (!isEmpty(response.UnprocessedItems)) console.log(JSON.stringify(response.UnprocessedItems, null, 2));
     return response;
 };
 
-async function run() {
+async function makeMock() {
 
-    let items = makeMockItems(10000);
+    let items = makeMockItems(100000);
     const table = 'cafzg3-lab';
 
     try {
-        await batchWrite(table, items).then(response => {
-            for (let r of response) {
-                if (!isEmpty(r.UnprocessedItems)) {
-                    for (let pr of r.UnprocessedItems[table]) {
-                        console.log(JSON.stringify(pr.PutRequest));
-                    }
-                };
-            };
+        batchWrite(table, items).then(response => {
+            // for (let r of response) {
+            //     if (!isEmpty(r.UnprocessedItems)) {
+            //         for (let pr of r.UnprocessedItems[table]) {
+            //             console.log(JSON.stringify(pr.PutRequest));
+            //         }
+            //     };
+            // };
         });
         return 'done';
     } catch (e) {
-        throw new Error(e);
+        throw new Error('broken');
     }
 };
 
 // populateDdb('cafzg3-lab').then( result => console.log(result))
-// makeBatch()
-// run().then(result => console.log(result))
+makeMock().then();
 
 // const v = {
 //     index: {
@@ -149,4 +183,4 @@ async function run() {
 //     }
 // }
 
-scan('cafzg3-lab', 'val', 'newerVal', true).then();
+// scan('cafzg3-lab', 'n2', 'n3', true).then();
