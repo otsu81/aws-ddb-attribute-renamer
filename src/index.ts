@@ -4,8 +4,10 @@ import { chunk, isEmpty, random, update } from "lodash";
 import * as crypto from "crypto";
 import { start } from "repl";
 import { PassThrough } from "stream";
+import * as readline from 'readline';
 
 const ddb = new DynamoDBClient({ region: 'eu-north-1' });
+let counter = 0;
 
 interface Item {
     [key:string]: {} | undefined
@@ -60,18 +62,18 @@ function changeAttributesonAll(items:Item[], oldAttr:string, newAttr:string, del
     return newItems;
 }
 
-async function scan(table: string, oldAttr: string, newAttr: string, del: boolean, startKey?:{}) {
-
+async function renameAttribute(table: string, oldAttr: string, newAttr: string, del: boolean, startKey?:{}) {
     let params:ScanCommandInput = {
         TableName: table,
         Limit: 1000,
         ExpressionAttributeNames: {"#v": oldAttr},
         FilterExpression: 'attribute_exists(#v)',
         ExclusiveStartKey: startKey
-    }
+    };
+
     if (!isEmpty(startKey)) {
         params = {...params, ExclusiveStartKey: startKey};
-    }
+    };
 
     let response = await ddb.send(new ScanCommand(params));
 
@@ -79,52 +81,54 @@ async function scan(table: string, oldAttr: string, newAttr: string, del: boolea
         const updatedItems = changeAttributesonAll(response.Items as Item[], oldAttr, newAttr, true);
         const ddbItems = makeItemsFromList(updatedItems);
         await batchWrite(table, ddbItems);
-    }
+    };
 
     // console.log(JSON.stringify(response, null, 2), "\n-------------------------");
-    // if (!isEmpty(response.LastEvaluatedKey)) {
-    //     await scan(table, oldAttr, newAttr, true, response.LastEvaluatedKey)
-    // }
+    if (!isEmpty(response.LastEvaluatedKey)) {
+        await renameAttribute(table, oldAttr, newAttr, true, response.LastEvaluatedKey)
+    }
 }
 
 // async function sendSingleBatchWithBackoff(table: string, params: BatchWriteItemCommandInput, retries: number = 0): Promise<BatchWriteItemCommandOutput> {
-async function sendSingleBatchWithBackoff(table: string, params: BatchWriteItemCommandInput, retries: number = 0) {
-    try {
-        return ddb.send(new BatchWriteItemCommand(params));
-    } catch (e) {
-        console.log(typeof e);
-        throw new Error('poop');
-    //     if (e instanceof Error) {
-    //         if (e.errorType === 'ThrottlingException' && retries < 6) {
-    //             const delay:number = random(500 * 2 ** retries);
-    //             console.log(`Throttled sending batch, attempt ${retries}, sleeping ${delay}`)
-    //             await timer(delay); // linear backoff + jitter
-    //             return sendSingleBatchWithBackoff(table, params, retries);
-    //         } else {
-    //             throw new Error(e.errorMessage);
-    //         }
+// async function sendSingleBatchWithBackoff(table: string, params: BatchWriteItemCommandInput, retries: number = 0) {
+//     try {
+//         return ddb.send(new BatchWriteItemCommand(params));
+//     } catch (e) {
+//         console.log(typeof e);
+//         throw new RetryError('poop');
+//     //     if (e instanceof Error) {
+//     //         if (e.errorType === 'ThrottlingException' && retries < 6) {
+//     //             const delay:number = random(500 * 2 ** retries);
+//     //             console.log(`Throttled sending batch, attempt ${retries}, sleeping ${delay}`)
+//     //             await timer(delay); // linear backoff + jitter
+//     //             return sendSingleBatchWithBackoff(table, params, retries);
+//     //         } else {
+//     //             throw new Error(e.errorMessage);
+//     //         }
 
-    //     }
-    }
-}
+//     //     }
+//     }
+// }
 
 async function batchWrite(table:string, items:{}[]) {
 
-    let batches = chunk(items, 25);
+    let batches = chunk(items, 25); // max size for DDB chunk is 25
     const promises = [];
 
-    // set a limit to nbr of batches
     let timestamp = Date.now();
-    let counter = 0;
+
+    // set a limit to nbr of batches to avoid throttling
     const concurrentBatches = 100;
     for (let batch of batches) {
+        readline.clearLine(process.stdout, 0);
+        readline.cursorTo(process.stdout, 0);
         counter++;
         let params = {
             RequestItems: {
                 [table]: batch
             }
         };
-        console.log(`sending batch ${counter}`)
+        process.stdout.write(`sending batch ${counter}`)
 
         promises.push(ddb.send(new BatchWriteItemCommand(params)));
         // promises.push(sendSingleBatchWithBackoff(table, params))
@@ -137,8 +141,8 @@ async function batchWrite(table:string, items:{}[]) {
     const response = await Promise.allSettled(promises);
     for (let r of response) {
         if (r.status === 'rejected') console.log(r);
-    }
-    // for (let r of result) {
+    };
+    // for (let r of response) {
     //     if (!isEmpty(r.UnprocessedItems)) {
     //         let unpItems:PutRequest[] = [];
     //         for (let unp of r.UnprocessedItems[table]) {
@@ -175,7 +179,7 @@ async function makeMock() {
 };
 
 // populateDdb('cafzg3-lab').then( result => console.log(result))
-makeMock().then();
+// makeMock().then();
 
 // const v = {
 //     index: {
@@ -183,4 +187,7 @@ makeMock().then();
 //     }
 // }
 
-// scan('cafzg3-lab', 'n2', 'n3', true).then();
+const timestamp = Date.now()
+renameAttribute('cafzg3-lab', 'newVal', 'val', true).then(res =>
+    console.log(`\nApprox ${counter * 25} items processed in  ${Date.now() - timestamp} ms`)
+);
