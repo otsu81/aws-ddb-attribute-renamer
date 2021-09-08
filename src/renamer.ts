@@ -5,6 +5,7 @@ import * as readline from 'readline';
 import minimist from 'minimist'
 
 let counter = 0;
+let retries = 0;
 
 interface Item {
     [key:string]: {} | undefined
@@ -84,7 +85,7 @@ async function batchWrite(table:string, items:{}[]) {
                 [table]: batch
             }
         };
-        process.stdout.write(`sending batch ${counter}`)
+        process.stdout.write(`sending batch ${counter}, retries ${retries}`)
 
         promises.push(ddb.send(new BatchWriteItemCommand(params)));
         if (counter % concurrentBatches == 0) {
@@ -93,9 +94,19 @@ async function batchWrite(table:string, items:{}[]) {
         };
     };
 
+    let unprocessed = new Array;
     const response = await Promise.allSettled(promises);
     for (let r of response) {
         if (r.status === 'rejected') console.log(r);
+        if (!isEmpty(r.value.UnprocessedItems)) {
+            for (let unpr of r.value.UnprocessedItems[table]) unprocessed.push(unpr);
+        };
+    };
+
+    if (!isEmpty(unprocessed)) {
+        retries++;
+
+        await batchWrite(table, unprocessed);
     };
 };
 
