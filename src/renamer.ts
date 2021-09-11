@@ -124,6 +124,7 @@ for (let r of args) {
 };
 if (argv.delete_old_attribute !== ('true' || 'false')) {
   console.log(`Incorret argument for --delete_old_attribute, must be either true or false\n${usgMsg}`);
+  exit(1);
 };
 
 const ddb = new DynamoDBClient({ region: argv.region });
