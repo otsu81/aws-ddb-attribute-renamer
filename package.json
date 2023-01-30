@@ -5,7 +5,7 @@
     "@types/lodash": "^4.14.172",
     "@types/minimist": "^1.2.2",
     "lodash": "^4.17.21",
-    "minimist": "^1.2.5"
+    "minimist": "^1.2.6"
   },
   "devDependencies": {
     "@types/node": "^16.7.13"
